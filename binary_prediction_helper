@@ -1,0 +1,1225 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+#Packages
+
+import helper
+
+from datetime import datetime
+import logging
+import operator
+import os
+import time
+import os.path
+import pickle
+
+import pandas as pd
+import numpy as np
+
+import matplotlib.pyplot as plt
+from matplotlib import pyplot
+from varclushi import VarClusHi 
+import scikitplot as skplt
+
+from scipy.stats import uniform as flt
+from scipy.stats import randint as itr
+
+from sklearn.model_selection import RandomizedSearchCV, KFold , cross_val_score, StratifiedKFold, cross_validate, train_test_split
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline, make_pipeline
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import OrdinalEncoder
+from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.tree import DecisionTreeClassifier
+from sklearn import tree
+from sklearn.impute import SimpleImputer
+from sklearn.feature_selection import VarianceThreshold, RFECV
+from sklearn.metrics import  roc_auc_score, brier_score_loss, precision_score, recall_score, roc_curve
+from sklearn.calibration import calibration_curve , CalibratedClassifierCV
+import sklearn.model_selection
+#from sklearn.metrics import plot_roc_curve
+from sklearn.base import BaseEstimator, RegressorMixin
+
+
+import statsmodels.api as sm_api
+from statsmodels.discrete import discrete_model
+import statsmodels.formula.api as smf
+
+import lightgbm as lgb
+import xgboost as xgb
+from lightgbm import LGBMClassifier 
+from xgboost import XGBClassifier                                                              
+                                                             
+#Explainer
+
+import shap
+
+# # Modules for Classifier Models
+
+# Spark to Pandas Dataset
+
+# In[21]:
+
+
+def get_data_spark(hive_statement):
+    """Imports data from PV Cluster - contact Asia_Data_Lab@manulife.com for access
+	
+	Args:
+	
+	1. hive_statement = select query from tables in PV cluster
+    
+    Returns: Pandas Dataframe
+    """
+    
+    df_spark = hive.executeQuery(hive_statement)
+
+    return df_spark.toPandas()
+
+# CSV to Pandas Dataset
+
+def get_data_csv(self):
+    """Imports a csv dataset
+	
+	Args:
+	1. self = directory and csv file (C:/Users/aaa.csv)
+    
+    Returns: Pandas Dataframe
+    """
+    
+    return pd.read_csv(self)
+
+
+def set_id(index, df):
+    """Sets Index of a DataFrame
+
+    Args:
+    1. index = new index to be used, input in single quotes ex. index ='client_num'
+    2. df = dataframe where new index is needed
+
+    Returns: df wit new index
+
+    """
+
+    df = df.set_index(df[index])
+    df = df.drop(index, axis='columns')
+
+
+    return df
+
+
+
+# Data Preprocessing
+
+# In[6]:
+
+
+def data_preparation(data_in, remove_list):
+    
+    """Prepares dataset for feature generation
+    
+    Steps:
+    1. Sets index to unique ID in column
+    2. Drops unnecessary columns from source
+    4. Creates Feature Dataframe 
+    
+     Args:
+ 
+    data_in: input data
+    index: input unique ID in data
+    list: list of columns to drop
+  
+
+    Returns:
+
+    tuple containing 0: dataframe , 1:target
+    """
+  
+    data_ft = data_in.drop(columns=remove_list)
+    
+    #data_ft = data_ft.set_index(data_ft[index])
+    #data_ft = data_ft.drop(index, axis='columns')
+
+    return data_ft
+
+
+# Data Model: Train and Test Set
+# 
+
+# In[7]:
+
+
+def data_partition(input_df, target, seed=123, prop=0.3):
+    """Defines Train and Test Set from input dataset 
+		Splits dataset into predictors (X) and target (y)
+    Args:
+    
+    1. input_df: dataframe of features
+    2. Target: Target Column Name
+    3. Seed: Random Seed default values
+    4. Prop: Test proportion
+    
+    Returns:
+    
+    Tuple of Train and Test Sets
+    """
+	
+    x = input_df.drop([target], axis=1)
+    y = input_df[[target]]
+	
+    x_train, x_test, y_train, y_test = train_test_split(x, y, stratify = y,
+                                                       random_state=seed, test_size=prop)
+    return x_train, x_test, y_train, y_test
+
+
+# Feature Selection 
+
+# In[8]:
+
+def feature_engineering(X_train, X_test, index , trans_pipe, use_scaling=True):
+    """Prepares the training data set for feature selection.
+
+    Create feature engineering pipeline.
+    Apply encoding to categorial feature variables.
+    Apply imputation of null values to both numeric and categorical feature variables.
+    
+    Args:
+        X_train: Data frame of training set feature variables.
+        X_test: Data frame of target set feature variables.
+		index: Data frame index
+		trans_pipe: preprocessing pipe
+        use_scaling: Flag to enable or disable MinMaxScaler for numerical feature engineering.
+    Retruns:
+        X_train: Feature engineered training set of feature variables.
+        X_test: Feature engineered test set of feature variables.
+        preprocessing_pipe: Fitted feature engineering transformer pipeline.
+        features_list: List of remaining predictor feature variables.
+    """
+
+    categorical_columns = list(
+        X_train.select_dtypes(include=["object", "int64", "uint8", "category"]).columns
+    )
+    logging.info(
+        f"Categorical features: {len(categorical_columns)} {categorical_columns}"
+    )
+
+   
+    numerical_columns = list(X_train.select_dtypes(exclude=["object", "int64","uint8", "category"]).columns)
+    logging.info(f"Numerical features: {len(numerical_columns)} {numerical_columns}")
+
+    categorical_pipe = Pipeline(
+        [
+            ("imputer", SimpleImputer(strategy="most_frequent")),
+        ]
+    )
+
+    if use_scaling:
+        numerical_pipe = Pipeline(
+            [
+                ("imputer", SimpleImputer(strategy="constant", fill_value = 0)),
+                # ("scaler", MinMaxScaler(feature_range=(0, 1))),
+                ("scaler", StandardScaler()),
+            ]
+        )
+    else:
+        numerical_pipe = Pipeline([("imputer", SimpleImputer(strategy="constant", fill_value = 0))])
+
+    preprocessing_pipe = ColumnTransformer(
+        [
+            ("categorical", categorical_pipe, categorical_columns),
+            ("numeric", numerical_pipe, numerical_columns),
+        ],
+        n_jobs=-1,
+    )
+
+    features_list = categorical_columns + numerical_columns 
+    preprocessing_pipe.fit(X_train)
+
+    X_train = preprocessing_pipe.transform(X_train)
+    X_train = pd.DataFrame(data=X_train, columns=features_list)
+
+    X_train = X_train.set_index(X_train[index])
+    X_train = X_train.drop(index, axis='columns')
+
+    X_train = X_train.astype(float)
+
+    X_test = preprocessing_pipe.transform(X_test)
+    X_test = pd.DataFrame(data=X_test, columns=features_list)
+
+    X_test = X_test.set_index(X_test[index])
+    X_test = X_test.drop(index, axis='columns')
+
+    X_test = X_test.astype(float)
+
+    pickle.dump(preprocessing_pipe, open(trans_pipe, 'wb'))
+
+    return X_train, X_test, preprocessing_pipe, features_list
+
+
+
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+
+def feature_selection(x_train, x_test , y_train, target , corr_y=0.3, corr_x = 0.9):
+    """Applies Feature Selection 
+    
+    
+    1. Remove features with Constant variance
+    2. Shortlists based on Correlation
+    3. Recursive Feature Elimiation CV using DecisionTreeClassifier
+    
+    Args:
+    
+    1. x_train: dataframe of features in training data
+    2. x_test : dataframe of features in test data
+    3. y_train: target variable column
+    4. target : name of target variable
+    5. corr_y : min correlation of feature to target to consider on shortlist. Default is 0.3
+    6. corr_x : max correlation feature-wise to drop 
+ 
+       
+    Returns:
+
+    Tuple of feature Shortlisted dataset, shortlisted variables
+    """
+
+    # Remove Constant
+
+    constant_filter = VarianceThreshold(threshold=0)
+    constant_filter.fit(x_train)
+    nonconstant = \
+        x_train.columns[constant_filter.get_support()].tolist()
+    x_train = x_train[nonconstant]
+
+
+    # 2 Correlation with Y
+
+    for_corr = [x_train, y_train]
+    for_corr = pd.concat((x_train, y_train), axis=1, join='inner')
+    corr = abs(for_corr.corr().iloc[:, -1])
+    corr1 = corr[corr > corr_y]
+    corr_slist = corr.index.tolist()
+    corr_slist.remove(target)
+    x_train = x_train[corr_slist]
+
+    # 3 Correlation Among X
+
+    corr_matrix = x_train.corr().abs()
+    upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape),
+                              k=1).astype(np.bool))
+    corr_features = [column for column in upper.columns
+                     if any(upper[column] > corr_x)]
+
+    x_train = x_train.drop(columns=corr_features)
+    features_list = x_train.columns.to_list()
+
+    x_test = x_test[features_list]
+
+    return x_train, x_test, features_list
+
+
+def feature_varclus(x_train, x_test ,eigval=1, n_clus=None):
+    
+    """Applies Feature reduction using VarClusHi , a Python Implementation of PROC VARCLUS in SAS
+	
+	PROC VARCLUS:
+	
+		https://support.sas.com/documentation/cdl/en/statug/63962/HTML/default/viewer.htm#statug_varclus_sect002.htm
+	
+	VARCLUSHI:
+	
+		https://github.com/jingmin1987/variable-clustering/blob/master/decomposition/var_clus.py
+	
+	Args: 
+    1. x_train - df of training set
+    2. x_test - df  of testing set
+    3. eigval = max eigenvalue per cluster. Default is 1
+    4. n_clus = number of clusters to create. Default is None, which creates all possible clusters
+    
+    
+    Returns:
+
+    Tuple of Shortlisted dataset, shortlisted variables
+    """
+    
+    #Variable Clustering using VarClusHi
+
+    cluster = VarClusHi(x_train, maxeigval2=eigval, maxclus=n_clus)
+    cluster.varclus()
+
+    # Get top variables per cluster
+
+    list1 = cluster.rsquare.loc[cluster.rsquare.groupby(['Cluster'
+                                ])['RS_Ratio'].idxmin()]
+    varlist = list1['Variable'].tolist()
+    x_train = x_train[varlist]
+    x_test = x_test[varlist]
+
+    return x_train, x_test, varlist
+
+#RFECV
+
+def feature_tree(x_train, x_test, y_train):
+	"""Performs RFECV using Logistic Regression
+	
+	Args:
+	
+	1. x_train = training set features
+	2. x_test  = test set features
+	3. y_train = column of labels in trainset
+	
+	Returns
+	
+	1. x_train = shortlisted train set features_df
+	2. x_test = shortlisted test set features_df
+	3. rfevar = shortlist of features
+
+	"""
+	estimator = DecisionTreeClassifier()
+	selector = RFECV(estimator , step = 1 , cv = 2)
+	selector = selector.fit(x_train, y_train.values.ravel())
+	rfevar = selector.get_support()
+	rfevar = np.ndarray.tolist(rfevar)
+	rfevar =  x_train.columns[rfevar]
+	x_train = x_train[rfevar]
+	x_test = x_test[rfevar]
+	
+	return x_train, x_test, rfevar
+	
+
+# Model Selection
+
+# In[10]:
+
+
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+
+
+def plot_hist(x_train, y_train, bins = 10):
+    """
+    Plot Histogram for Each Feature
+    
+    Args:
+    1. x_train = 
+    2. y_train = 
+	3. bins = number of bins
+    
+    Returns:
+    
+    Histogram of Features with respect to target variable.
+    """
+    
+    for i in x_train.columns:
+        plt.figure(figsize=(8,5))
+        plt.title('Histogram for '+str(i))
+		
+		
+		
+		#plt.hist(x_train['OWNER_ISS_AGE'][y_train[y_train.columns[0]]==0]))
+		
+        plt.hist(x_train[i][y_train[y_train.columns[0]] == 0], bins=10, color= 'b', label='Non-Responders', alpha=0.6)
+        plt.hist(x_train[i][y_train[y_train.columns[0]] == 1], bins=10, color= 'g', label='Responders', alpha=0.7)
+        plt.legend();
+        
+    return
+
+
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+
+
+def model_selection(
+    x_train,
+    y_train,
+    x_test,
+    y_test,
+    scoring 
+    ):
+    """Perform Binary Classification Model Selection
+....
+....Available models are LogisticRegression, RandomForestClassifier,
+....XGBoost, Light GBM and tuned Light GBM
+....
+    Args:
+    
+    1. x_train = training data feature
+    2. y_train = training data label
+    3. x_test = test data feature
+    4. y_test = test data label
+    5. scoring = single metric used to decide in model selection
+    
+    Returns:
+    
+    Prints model scoring for model selection
+    """
+
+    pipe_lr = Pipeline([('clf', LogisticRegression(random_state=123,
+                       solver='lbfgs', 
+                       max_iter  = 10000))])
+
+    pipe_dtree = Pipeline([('dtree',
+                          DecisionTreeClassifier(random_state=123))])
+
+    pipe_rf = Pipeline([('rf', RandomForestClassifier(random_state=123,
+                       n_estimators=1000))])
+
+    pipe_xgb = Pipeline([('xgb', xgb.XGBClassifier(random_state=123))])
+
+    pipe_lgb = Pipeline([('lgb', lgb.LGBMClassifier(random_state=123))])
+
+    rf_params = {
+        'rf__bootstrap': [True, False],
+        'rf__max_depth': [3, 5, 10],
+        'rf__max_features': [20, 50, 100],
+        'rf__min_samples_leaf': [5, 10, 15, 20,30],
+        'rf__min_samples_split': [5, 10, 15, 20,30],
+        'rf__n_estimators': [5, 10, 30],
+        }
+
+    rs_pipe_rf = RandomizedSearchCV(
+        estimator=pipe_rf,
+        param_distributions=rf_params,
+        scoring=scoring,
+        n_iter=20,
+        cv=20,
+        random_state=123,
+        )
+
+    lgb_params = {
+        'lgb__learning_rate': flt(0.001, 0.2),
+        'lgb__max_depth': [3, 5, 10],
+        'lgb__min_data_in_leaf': [20, 30, 40, 100],
+       # 'lgb__colsample_by_tree': flt(0.5, 0.9),
+        'lgb__min_child_weight': [1, 3],
+        'lgb__bagging_fraction': flt(0, 1),
+        'lgb__num_leaves' : [8,10,100],
+        'lgb_feature_fraction' : [0.2,0.3,0.4,0.6,0.8],
+        'lgb_min_gain_to_split' : [0.2,0.3]
+        }
+
+    rs_pipe_lgb = RandomizedSearchCV(
+        estimator=pipe_lgb,
+        param_distributions=lgb_params,
+        scoring=scoring,
+        n_iter=100,
+        cv=10,
+        random_state=123,
+        )
+
+    dtree_params = {
+        'dtree__max_depth': [3, 4, 5, 7],
+        'dtree__min_samples_split': [20, 50, 1000],
+        'dtree__min_samples_leaf': [20, 30, 40, 100],
+        }
+
+    rs_pipe_tree = RandomizedSearchCV(
+        estimator=pipe_dtree,
+        param_distributions=dtree_params,
+        scoring=scoring,
+        n_iter=20,
+        cv=10,
+        random_state=123,
+        )
+
+    xgb_params = {
+        'xgb__eta' : flt(0.0001, 0.2), #learning rate
+        'xgb__gamma' : [0.1,0.2,0.3,0.5], #min split loss
+        'xgb__max_depth' : [3,6,10],
+        'xgb__subsample' : flt(0.3,0.7),
+        'xgb__colsample_bytree' : flt(0.3,0.9)
+    }
+
+    rs_pipe_xgb = RandomizedSearchCV(
+        estimator=pipe_lgb,
+        param_distributions=xgb_params,
+        scoring=scoring,
+        n_iter=100,
+        cv=10,
+        random_state=123,
+        )
+
+    pipelines = [
+        pipe_lr
+        ,pipe_dtree
+        ,pipe_rf
+      #  ,pipe_xgb
+      #  ,pipe_lgb
+       ,rs_pipe_rf
+      #  ,rs_pipe_lgb
+        ,rs_pipe_tree
+       # ,rs_pipe_xgb
+        ]
+
+    start_time = time.time()
+
+    models = {}
+
+    for p in pipelines:
+        cv_results = cross_validate(
+            estimator=p,
+            X=x_train,
+            y=y_train.values.ravel(),
+            cv=10,
+            n_jobs=-1,
+            return_train_score=True,
+            return_estimator=True,
+            scoring=scoring,
+            )
+ 
+        models[p] = cv_results['test_score'].mean()
+
+    # Get model pipeline with highest validation AUC score
+
+    best_model = max(models.items(), key=operator.itemgetter(1))[0]
+
+    return (models, best_model)
+
+
+#MultiClass
+
+def model_select_multiclass(x_train,y_train,x_test,y_test):
+    """Perform Multiclass Classification Model Selection 
+    
+    Args:
+    
+    1. x_train = training data feature
+    2. y_train = training data label
+    3. x_test = test data feature
+    4. y_test = test data label
+    
+    Returns:
+    
+    Prints model scoring for model selection
+    """
+
+    pipe_lr = Pipeline([('clf', LogisticRegression(random_state=123,
+                       solver='lbfgs',
+					   multi_class = 'ovr'))])
+
+    pipe_rf = Pipeline([('rf', RandomForestClassifier(random_state=123,
+                       n_estimators=1000))])
+					   
+    pipe_xgb = Pipeline([('xgb', xgb.XGBClassifier(random_state=123,
+						objective='multi:softprob'))])
+	
+    xgb_params = {
+        'rf__bootsrap': [True, False],
+        'rf__max_depth': [3, 5, 10],
+        'rf__max_features': [20, 50, 100],
+        'rf__min_samples_leaf': [1,5 , 10],
+        'rf__min_samples_split': [1, 5, 10],
+        'rf__n_estimators': [5,10,30]
+        }
+
+    rs_pipe_xgb = RandomizedSearchCV(
+        estimator=pipe_xgb,
+        param_distributions=xgb_params,
+        scoring='roc_auc_ovr',
+        n_iter=100,
+        cv=10,
+        random_state=123
+        )
+
+    pipe_lgb = Pipeline([('lgb', lgb.LGBMClassifier(random_state=123,
+						objective='multi:softprob'))])
+
+    lgb_params = {
+        'lgb__learning_rate': flt(0.001, 0.2),
+        'lgb__max_depth': [3, 5,  10],
+        'lgb__min_data_in_leaf': [20, 30, 40, 100],
+        'lgb__colsample_by_tree': flt(0.5, 0.9),
+        'lgb__min_child_weight': [1, 3],
+        'lgb__bagging_fraction': flt(0, 1)
+        }
+
+    rs_pipe_lgb = RandomizedSearchCV(
+        estimator=pipe_lgb,
+        param_distributions=lgb_params,
+        scoring='roc_auc_ovr',
+        n_iter=10,
+        cv=10,
+        random_state=123,
+        )
+
+    pipelines = [pipe_lr, pipe_rf, pipe_xgb, rs_pipe_xgb, pipe_lgb, rs_pipe_lgb]
+
+    start_time = time.time()
+
+    models = {}
+
+    for p in pipelines:
+        cv_results = cross_validate(
+            estimator=p,
+            X=x_train,
+            y=y_train,
+            cv=8,
+            n_jobs=-1,
+            return_train_score=True,
+            return_estimator=True,
+            scoring=("roc_auc_ovr")
+        )
+
+        models[p] = cv_results["test_score"].mean()
+
+      
+    # Get model pipeline with highest validation AUC score
+    best_model = max(models.items(), key=operator.itemgetter(1))[0]
+    
+
+    return models, best_model
+
+
+# In[12]:
+
+
+#Model Training
+
+def model_training(x_train, y_train, clf, model_file_name):
+    """Trains a chosen model to a training dataset.
+    
+    Args:
+        X: Features dataset.
+        y: Target dataset.
+        clf: Classifier.
+        model_file_path: The model will be saved in this file path in pickle format.
+    
+    Returns:
+        model: The fitted model.
+        y_prob: An array of classification probability prediction values.
+        y_pred: An array of predictions.
+    """
+
+    model = clf.fit(x_train, y_train)
+    #logging.info(f"Fitted classifier:\n{clf}")
+
+    y_prob = model.predict_proba(x_train)
+    y_pred = model.predict(x_train)
+    
+    cutoff = np.around(np.percentile(y_prob[:,1], np.arange(0, 100, 10)), decimals = 7)
+
+    # Save Model
+    pickle.dump(model, open(model_file_name, "wb"))
+    #logging.info(f"Model saved to: {model_file_path}")
+
+    return model, y_prob, y_pred, cutoff
+
+
+# Model Validation
+
+# In[20]:
+
+
+def model_prediction(df, target, cutoff, fitted_model):
+    
+    """Evaluates model on Validation Set
+    
+    Args:
+    
+    1. df = validation set
+    2. target = response in validation set
+    3. model = fitted model
+    4. cutoff = array of probability cutoffs
+
+    
+    Returns:
+    
+    1. test data with predicted prob [p_1], decile score [decile] and original target
+    2. test data without original target
+
+    """
+    
+    model = pickle.load(open(fitted_model , "rb"))
+    
+    df['p_1'] = model.predict_proba(df)[:,1]
+    
+    y_prob = df['p_1']
+    
+    conditions = [
+    (df['p_1'] <   cutoff[1]),
+    (df['p_1'] >=  cutoff[1]) & (df['p_1'] < cutoff[2]),
+    (df['p_1'] >=  cutoff[2]) & (df['p_1'] < cutoff[3]),
+    (df['p_1'] >=  cutoff[3]) & (df['p_1'] < cutoff[4]),
+    (df['p_1'] >=  cutoff[4]) & (df['p_1'] < cutoff[5]),
+    (df['p_1'] >=  cutoff[5]) & (df['p_1'] < cutoff[6]),
+    (df['p_1'] >=  cutoff[6]) & (df['p_1'] < cutoff[7]),
+    (df['p_1'] >=  cutoff[7]) & (df['p_1'] < cutoff[8]),
+    (df['p_1'] >=  cutoff[8]) & (df['p_1'] < cutoff[9]),
+    (df['p_1'] >=  cutoff[9])]
+    choices = [10,9,8,7,6,5,4,3,2,1]
+
+    df['decile'] = np.select(conditions, choices, default='null').astype(int)
+   
+    val_list = [df , target]
+    validation_sets = val_list[0].join(val_list[1])
+    
+    return validation_sets, df , y_prob
+
+# Reports Generation
+
+# In[19]:
+
+
+def generate_report(data, y_test, y):
+    """Generates Decile Analysis
+    
+    Args:
+    
+    1. data = data for decile analysis
+    2. y = target variable
+    
+    Returns:
+    
+    1. decile analysis
+
+    """
+    data  = data.join(y_test)
+	
+    data['nonresp'] = 1-data[y]
+    
+    deciles = pd.pivot_table(data=data,index=['decile'],
+                             values=[y,'nonresp'],
+                             aggfunc={y:[np.sum],
+                                     'nonresp':[np.sum]})
+    
+    #deciles.to_csv(r'C:\Users\martken\Documents\sample.csv')
+    
+    return deciles
+
+
+#ROC Plots
+
+def plot_model_roc(x_train, y_train, x_test, y_test):
+    """
+    Plots the ROC Curve
+    
+    Args:
+    1. x_train = train feature data set
+    2. y_train = train target data set
+    3. x_test = test feature data set
+    4. y_test = test target data set
+    
+    Returns:
+    ROC Curve
+    """
+    
+    x_test[x_test.isnull()] = 0
+    
+    model = clf.fit(x_train, y_train)
+    
+    logit_roc_auc = roc_auc_score(y_test, model.predict(x_test))
+    fpr, tpr, thresholds = roc_curve(y_test, model.predict_proba(x_test)[:,1])
+    plt.figure()
+    plt.plot(fpr, tpr, label='Model (area = %0.2f)' % logit_roc_auc)
+    plt.plot([0, 1], [0, 1],'r--')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('Receiver Operating Characteristic')
+    plt.legend(loc="lower right")
+    plt.show();
+    
+    return
+
+#SHAP
+
+def shap_plot(model, train_data):
+    """
+    Generates SHAP summary plot
+    
+    Args:
+    1. model = algorithm used
+    2. train_data = feature train data
+    
+    Returns:
+    SHAP summary plot
+    """
+    shap.initjs()
+    explainer = shap.TreeExplainer(model)
+    
+    shap_values = np.array(explainer.shap_values(train_data))
+	
+    chart = shap.summary_plot(shap_values[1], features=train_data)
+    
+    shap_values_mean = pd.DataFrame(abs(shap_values[1]), columns=train_data.columns).mean()
+    
+    shap_values_mean = shap_values_mean[shap_values_mean > 0].sort_values(ascending=False)
+    
+    return chart, shap_values, shap_values_mean
+	
+#SHAP Dependece Plot--
+
+def shap_dep_plot(x, train_data, shap_values):
+    """
+    Generates Dependency Plots
+    
+    Args:
+    1. x = feature list or top variables
+    2. train_data = training dataset
+    3. shap_values = shap values
+    
+    Returns:
+    Dependency Plots
+    """
+    
+    for i in x:
+        shap.dependence_plot(i, shap_values[1], train_data, interaction_index=None)
+        
+    return
+
+
+# 
+# Write Scored Data to PV Cluster
+
+# In[ ]:
+
+#Calibration Plots
+
+def plot_calibration(y_test, y_prob, n_bins = 10):
+    """
+    Generates Calibration Plots
+    
+    Args:
+    1. y_test = label of test set (or any validation set)
+    2. y_prob = predicted probability from test set (or any validation set)
+    3. n_bins = number of bins for plots
+    
+    Returns:
+    Calibration Plot, Brier Score
+    """
+    
+    fop, mpv = calibration_curve(y_test,y_prob, n_bins=10, normalize=True)
+	# plot perfectly calibrated
+    pyplot.plot([0, 1], [0, 1], linestyle='--')
+    # plot calibrated reliability
+    pyplot.plot(mpv, fop, marker='.')
+    plt.xlabel('Binned Predicted Probabilities')
+    plt.ylabel('Fraction of Positives  ')
+    plt.title('Calibration Plot')
+    
+    pyplot.show()
+
+    print('Brier Score: %s' % brier_score_loss(y_test, y_prob))
+
+    return 
+
+#Calibrated Classifier
+
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+
+
+def calibrated_class(x_train,x_test,y_train,base_model):
+    """
+    Generates Calibrated Probabilities from Fitted Models
+    
+    Args:
+    1. x_train = label of test set (or any validation set)
+    2. y_train = predicted probability from test set (or any validation set)
+    3. base_model
+    
+    Returns:
+    Calibration Plot, Brier Score....
+    """
+
+    model = base_model
+
+    calibrator = CalibratedClassifierCV(model, method='sigmoid',
+            cv='prefit')
+    calibrated_model = calibrator.fit(x_train, y_train.values.ravel())
+    y_prob_cal = calibrated_model.predict_proba(x_test)[:, 1]
+
+    return y_prob_cal
+	
+	
+#Logistic Regression Sets
+
+
+
+def logistic_gen_deciles(logistic_model, df, varlist,beta=1):
+
+
+	"""
+	Generates decile cutoffs for Predicted Probabilites from a Logistic Regression Model
+	These cutoffs can be used in the model scoring process.
+	
+	Args
+	
+	1. logistic_model = fitted logistic regression model
+	2. df = scoring dataframe
+	3. varlist = shorlisted variables used in Logistic Regression Model
+	4. beta = adjustment based on undsersampling
+	
+	https://www3.nd.edu/~rjohns15/content/papers/ssci2015_calibrating.pdf
+	
+	Returns
+	
+	1. Cutoff = cutoff probabilities
+	2. y_prob = predicted probabilities
+	3. df = dataframe with pre
+	"""
+	
+	df['p_1']  = logistic_model.predict(df[varlist])
+	
+	df['p_1'] = (beta*df['p_1']) / (beta*df['p_1'] - df['p_1']  +1)
+	
+	y_prob = df['p_1']
+
+	cutoff = np.around(np.percentile(df['p_1'] , np.arange(0, 100, 10)), decimals = 7)
+	
+	
+	return cutoff, y_prob, df
+	
+	
+def logistic_predict(df, cutoff, varlist, logistic_model, beta=1):
+
+	
+	"""
+	Predict Using Logistic Regression and Apply Deciles
+	
+	Args
+	
+	1. df = dataframe to be scored_data
+	2. cutoff = list of decile cutoffs
+	4. beta = correction for undersampling
+	
+	Returns
+	
+	1. scored_data  = scored data with probab
+	ilities and decile group 
+	
+	"""
+	
+	df['p_1']  = logistic_model.predict(df[varlist])
+	
+	df['p_1'] = (beta*df['p_1']) / (beta*df['p_1'] - df['p_1']  +1)
+	
+	conditions = [
+			(df['p_1'] <   cutoff[1]),
+			(df['p_1'] >=  cutoff[1]) & (df['p_1'] < cutoff[2]),
+			(df['p_1'] >=  cutoff[2]) & (df['p_1'] < cutoff[3]),
+			(df['p_1'] >=  cutoff[3]) & (df['p_1'] < cutoff[4]),
+			(df['p_1'] >=  cutoff[4]) & (df['p_1'] < cutoff[5]),
+			(df['p_1'] >=  cutoff[5]) & (df['p_1'] < cutoff[6]),
+			
+			(df['p_1'] >=  cutoff[6]) & (df['p_1'] < cutoff[7]),
+			(df['p_1'] >=  cutoff[7]) & (df['p_1'] < cutoff[8]),
+			(df['p_1'] >=  cutoff[8]) & (df['p_1'] < cutoff[9]),
+			(df['p_1'] >=  cutoff[9])]
+			
+	choices = [10,9,8,7,6,5,4,3,2,1]
+
+	df['decile'] = np.select(conditions, choices, default='null').astype(int)
+	
+	
+	scored_data = df[['p_1', 'decile']]
+
+	return scored_data
+	
+
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+
+
+def logistic_roc(y_test, predictions):
+    """ROC for Logistic Regression
+....
+....Args
+....
+....1. y_test = test label
+....2. prediction = predicted probabilites
+....
+....Returns
+....
+....1. ROC Plot
+....2. AUC
+...."""
+
+    ns_probs = [0 for _ in range(len(y_test))]
+    ns_fpr, ns_tpr, ns_thresholds = roc_curve(y_test, ns_probs)
+
+    (ns_fpr, ns_tpr, tresholds) = roc_curve(y_test, ns_probs)
+    (fpr, tpr, tresholds) = roc_curve(y_test, predictions)
+
+    # plot the roc curve for the model
+
+    pyplot.plot(ns_fpr, ns_tpr, linestyle='--', label='No Skill')
+    pyplot.plot(fpr, tpr, marker='.', label='Logistic')
+
+    # axis labels
+
+    pyplot.xlabel('False Positive Rate')
+    pyplot.ylabel('True Positive Rate')
+
+    # show the legend
+
+    pyplot.legend()
+
+    # show the plot
+
+    fig = pyplot.show()
+
+    fpr, tpr, thresholds = roc_curve(y_test, predictions)
+    roc = roc_auc_score(y_test, predictions)
+
+    return fig, roc
+
+	
+
+#Production
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+
+
+def feature_eng_prod(features_df, transform_pipe, index):
+    """
+....Applies the fitted transformation pipeline to new dataset.
+
+    """
+
+    categorical_columns = \
+        list(features_df.select_dtypes(include=['object', 'int64' , 'category'
+             ]).columns)
+
+    numerical_columns = list(features_df.select_dtypes(exclude=['object'
+                             , 'int64', 'category']).columns)
+
+    #preprocessing_pipe = transform_pipe
+
+    preprocessing_pipe = pickle.load(open(transform_pipe, 'rb'))
+    features_list = categorical_columns + numerical_columns
+
+    # preprocessing_pipe.fit(features_df)
+
+    features_df = preprocessing_pipe.transform(features_df)
+    features_df = pd.DataFrame(data=features_df, columns=features_list)
+	
+    features_df = features_df.set_index(features_df[index])
+    features_df = features_df.drop(index , axis='columns')
+    features_df = features_df.astype(float)
+
+
+    # Add correct Index
+
+    return features_df
+
+
+
+
+def predict_prod(df, cutoff, varlist, input_model):
+
+	"""
+	Predict Using Logistic Regression and Apply Deciles
+	
+	Args
+	
+	1. df = dataframe to be scored_data
+	2. cutoff = list of decile cutoffs
+	3. input_model = fitted logistic regression model
+	
+	
+	Returns
+	
+	1. scored_data  = scored data with probabilities and decile group 
+	
+	"""
+	
+
+	model = pickle.load(open(input_model , "rb"))
+	
+	
+	
+	#df_c['p_1']  = model.predict(df_c[varlist])
+	
+	df['p_1']  = model.predict_proba(df[varlist])[:,1]
+	
+		
+	
+	
+	
+	conditions = [
+			(df['p_1'] <   cutoff[1]),
+			(df['p_1'] >=  cutoff[1]) & (df['p_1'] < cutoff[2]),
+			(df['p_1'] >=  cutoff[2]) & (df['p_1'] < cutoff[3]),
+			(df['p_1'] >=  cutoff[3]) & (df['p_1'] < cutoff[4]),
+			(df['p_1'] >=  cutoff[4]) & (df['p_1'] < cutoff[5]),
+			(df['p_1'] >=  cutoff[5]) & (df['p_1'] < cutoff[6]),
+			(df['p_1'] >=  cutoff[6]) & (df['p_1'] < cutoff[7]),
+			(df['p_1'] >=  cutoff[7]) & (df['p_1'] < cutoff[8]),
+			(df['p_1'] >=  cutoff[8]) & (df['p_1'] < cutoff[9]),
+			(df['p_1'] >=  cutoff[9])]
+			
+	choices = [10,9,8,7,6,5,4,3,2,1]
+
+	df['decile'] = np.select(conditions, choices, default=0).astype(int)
+	
+	
+	scored_data = df[['p_1', 'decile']]
+
+	return scored_data
+
+
+
+
+
+def prod_logistic_predict(df, cutoff, varlist, input_model,  beta=1):
+
+	"""
+	Predict Using Logistic Regression and Apply Deciles
+	
+	Args
+	
+	1. df = dataframe to be scored_data
+	2. cutoff = list of decile cutoffs
+	3. input_model = fitted logistic regression model
+	4. beta = correction for undersampling (https://www3.nd.edu/~rjohns15/content/papers/ssci2015_calibrating.pdf)
+	
+	Returns
+	
+	1. scored_data  = scored data with probabilities and decile group 
+	
+	"""
+	
+
+	model = pickle.load(open(input_model , "rb"))
+	
+	df_c = sm_api.add_constant(df, has_constant='add')
+	
+	#df_c['p_1']  = model.predict(df_c[varlist])
+	
+	df_c['p_1']  = model.predict(df[varlist])
+	
+		
+	df['p_1'] = (beta*df['p_1']) / (beta*df['p_1'] - df['p_1']  +1)
+	
+	
+	conditions = [
+			(df_c['p_1'] <   cutoff[1]),
+			(df_c['p_1'] >=  cutoff[1]) & (df_c['p_1'] < cutoff[2]),
+			(df_c['p_1'] >=  cutoff[2]) & (df_c['p_1'] < cutoff[3]),
+			(df_c['p_1'] >=  cutoff[3]) & (df_c['p_1'] < cutoff[4]),
+			(df_c['p_1'] >=  cutoff[4]) & (df_c['p_1'] < cutoff[5]),
+			(df_c['p_1'] >=  cutoff[5]) & (df_c['p_1'] < cutoff[6]),
+			(df_c['p_1'] >=  cutoff[6]) & (df_c['p_1'] < cutoff[7]),
+			(df_c['p_1'] >=  cutoff[7]) & (df_c['p_1'] < cutoff[8]),
+			(df_c['p_1'] >=  cutoff[8]) & (df_c['p_1'] < cutoff[9]),
+			(df_c['p_1'] >=  cutoff[9])]
+			
+	choices = [10,9,8,7,6,5,4,3,2,1]
+
+	df_c['decile'] = np.select(conditions, choices, default=0).astype(int)
+	
+	
+	scored_data = df_c[['p_1', 'decile']]
+
+	return scored_data
+
+
+    
